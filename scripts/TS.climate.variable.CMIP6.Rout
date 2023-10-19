@@ -1,0 +1,253 @@
+
+R version 3.6.3 (2020-02-29) -- "Holding the Windsock"
+Copyright (C) 2020 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+  Natural language support but running in an English locale
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+> rm(list = ls())
+> 
+> library(dplyr)
+
+Attaching package: ‘dplyr’
+
+The following objects are masked from ‘package:stats’:
+
+    filter, lag
+
+The following objects are masked from ‘package:base’:
+
+    intersect, setdiff, setequal, union
+
+> library(tidyr)
+> library(ggplot2)
+> library(rnaturalearth)
+> library(rnaturalearthdata)
+> library(sf)
+Linking to GEOS 3.10.2, GDAL 3.4.3, PROJ 8.2.0; sf_use_s2() is TRUE
+WARNING: different compile-time and runtime versions for GEOS found:
+Linked against: 3.10.2-CAPI-1.16.0 compiled against: 3.10.1-CAPI-1.16.0
+It is probably a good idea to reinstall sf, and maybe rgeos and rgdal too
+> library(YGB)
+> library(raster)
+Loading required package: sp
+
+Attaching package: ‘raster’
+
+The following object is masked from ‘package:dplyr’:
+
+    select
+
+> 
+> ##############################################################################
+> 
+> Avi.AFR <- stack("/home/femeunier/Documents/projects/SoilSensitivity/data/AGBavit_AFR.gri")
+> 
+> e <- as(extent(-10, 45, -15, 10), 'SpatialPolygons')
+> crs(e) <- "+proj=longlat +datum=WGS84 +no_defs"
+> Avi.AFR.crop <- crop(Avi.AFR, e)
+> 
+> ##############################################################################
+> system2("rsync",paste("hpc:/kyukon/data/gent/vo/000/gvo00074/felicien/R/outputs/pr.CMIP6.scenarssp585_yr.min_2015_yr.max_2100.RDS",
++                       "/home/femeunier/Documents/projects/CongoAS/outputs/"))
+mesg: ttyname failed: Inappropriate ioctl for device
+> system2("rsync",paste("hpc:/kyukon/data/gent/vo/000/gvo00074/felicien/R/outputs/pr.CMIP6.scenarhistorical_yr.min_1900_yr.max_2020.RDS",
++                       "/home/femeunier/Documents/projects/CongoAS/outputs/"))
+mesg: ttyname failed: Inappropriate ioctl for device
+> 
+> pr.historical <- readRDS("/home/femeunier/Documents/projects/CongoAS/outputs/pr.CMIP6.scenarhistorical_yr.min_1900_yr.max_2020.RDS")
+> pr.scenario <- readRDS("/home/femeunier/Documents/projects/CongoAS/outputs/pr.CMIP6.scenarssp585_yr.min_2015_yr.max_2100.RDS")
+> 
+> pr.all <- bind_rows(list(pr.historical,
++                          pr.scenario))
+> 
+> 
+> init.year <- min(pr.all$yr)
+> final.year <- max(pr.all$yr)
+> 
+> years <- seq(init.year+14,final.year-15,10)
+> models <- unique(pr.all$model)
+> 
+> all.models.years.MCWD <- data.frame()
+> 
+> for (iyear in seq(1,length(years))){
++ 
++   print(paste0("- ",iyear/length(years)))
++ 
++   for (imodel in seq(1,length(models))){
++     print(paste0("-- ",imodel/length(models)))
++     cdf <-  pr.all %>%
++       filter(model == models[imodel],
++              yr >= (years[iyear] - 15),  yr < (years[iyear] + 15))
++ 
++     if (nrow(cdf) < 12) next()
++ 
++     cdf <- cdf %>%
++       dplyr::filter(lat <= 10, lat >= -15, lon <= 45, lon >= -10) %>%
++       group_by(model,yr,lat,lon) %>%
++       mutate(MAP = mean(pr)*86400*365,
++              N = length(pr)) %>%
++       filter(N == 12) %>%
++       mutate(month = 1:12)
++ 
++ 
++     # First calculate MCWD
++     cdf.MCWD <- cdf %>%
++       mutate(Pmm=pr*86400*30) %>%
++       filter(!is.na(Pmm)) %>%
++       group_by(model,yr,lat,lon,month) %>%
++       dplyr::select(model,lon,lat,Pmm,yr,month) %>%
++       group_by(model,month,lon,lat) %>%
++       summarise(Pmm = mean(Pmm),
++                 .groups = "keep") %>%
++       group_by(model,lon,lat) %>%
++       mutate(Ndays = c(31,28,31,30,31,30,31,31,30,31,30,31),
++              E = 3.33,
++              Etot = E*Ndays) %>%
++       mutate(diff = Pmm - Etot) %>%
++       mutate(wettest.month = which.max(diff)) %>%
++       mutate(month.ord = 1 + (month - wettest.month)) %>%
++       mutate(month.ord = case_when(month.ord <= 0 ~ month.ord + 12,
++                                    TRUE ~ month.ord)) %>%
++       arrange(month.ord) %>%
++       mutate(CWD = case_when(month.ord == 1 ~ pmin(0,diff),
++                              TRUE ~ NA_real_)) %>%
++       mutate(CWD = calc.CWD(diff,CWD[1])) %>%
++       arrange(month) %>%
++       mutate(MCWD = min(CWD))
++ 
++     cdf.MCWD.sum <- cdf.MCWD %>%
++       group_by(model,lat,lon) %>%
++       summarise(MCWD = mean(MCWD,na.rm = TRUE),
++                 .groups = "keep")
++ 
++     cdf.MAP.sum <- cdf.MCWD %>%
++       group_by(model,lat,lon,month) %>%
++       summarise(Pmonth = mean(Pmm,na.rm = TRUE),
++                 .groups = "keep") %>%
++       group_by(model,lat,lon) %>%
++       summarise(MAP = sum(Pmonth,na.rm = TRUE),
++                 .groups = "keep")
++ 
++     # Then resample
++ 
++     lat <- cdf.MCWD.sum %>% pull(lat)
++     lon <- cdf.MCWD.sum %>% pull(lon)
++ 
++     if (length(unique(diff(sort(unique(lat))))) > 1){
++       res <- max(c(diff(sort(unique(lat))),diff(sort(unique(lon)))))
++       dfr.cdf <- raster(SpatialPixelsDataFrame(points = cdf.MCWD.sum[c("lon","lat")],
++                                                data = cdf.MCWD.sum["MCWD"],
++                                                tolerance = res/10))
++ 
++       dfr.MAP.cdf <- raster(SpatialPixelsDataFrame(points = cdf.MAP.sum[c("lon","lat")],
++                                                data = cdf.MAP.sum["MAP"],
++                                                tolerance = res/10))
++ 
++     } else {
++       dfr.cdf <- rasterFromXYZ(cdf.MCWD.sum  %>% ungroup() %>% dplyr::select(lon,lat,MCWD))
++       dfr.MAP.cdf <- rasterFromXYZ(cdf.MAP.sum  %>% ungroup() %>% dplyr::select(lon,lat,MAP))
++     }
++ 
++     dfr.cdf.rspld <- resample(dfr.cdf,Avi.AFR.crop)
++     dfr.cdf.rspld[is.na(Avi.AFR.crop)] <- NA
++ 
++     dfr.cdf.MAP.rspld <- resample(dfr.MAP.cdf,Avi.AFR.crop)
++     dfr.cdf.MAP.rspld[is.na(Avi.AFR.crop)] <- NA
++ 
++     cdf.rspld <- as.data.frame(dfr.cdf.rspld,xy = TRUE) %>%
++       rename(lon = x,
++              lat = y) %>% filter(!is.na(MCWD))
++ 
++     cdf.MAP.rspld <- as.data.frame(dfr.cdf.MAP.rspld,xy = TRUE) %>%
++       rename(lon = x,
++              lat = y) %>% filter(!is.na(MAP))
++ 
++     all.models.years.MCWD <- bind_rows(list(all.models.years.MCWD,
++                                             cdf.rspld %>% mutate(model = models[imodel],
++                                                                  year = years[iyear]) %>%
++                                               mutate(MAP = as.vector(cdf.MAP.rspld %>% pull(MAP)))
++                                             ))
++ 
++ 
++     # world <- ne_countries(scale = "medium", returnclass = "sf")
++     # ggplot() +
++     #   geom_tile(data = cdf.rspld ,
++     #             aes(x = lon, y = lat,
++     #                 fill = MCWD),
++     #             alpha = 1) +
++     #   geom_sf(data = world,fill = NA,color = "black") +
++     #   theme_bw() +
++     #   scale_x_continuous(limits = c(-10,45),expand = c(0,0)) +
++     #   scale_y_continuous(limits = c(-16,10),expand = c(0,0)) +
++     #   scale_fill_gradient(low = "red",high = "white",na.value = "transparent") +
++     #   labs(x = "", y = "", fill = "AGB \r\n (kgC/m²)") +
++     #   guides(size = "none") +
++     #   theme(text = element_text(size = 20))
++   }
++ }
+[1] "- 0.0555555555555556"
+[1] "-- 0.0196078431372549"
+[1] "-- 0.0392156862745098"
+[1] "-- 0.0588235294117647"
+[1] "-- 0.0784313725490196"
+[1] "-- 0.0980392156862745"
+[1] "-- 0.117647058823529"
+[1] "-- 0.137254901960784"
+[1] "-- 0.156862745098039"
+[1] "-- 0.176470588235294"
+[1] "-- 0.196078431372549"
+[1] "-- 0.215686274509804"
+[1] "-- 0.235294117647059"
+[1] "-- 0.254901960784314"
+[1] "-- 0.274509803921569"
+[1] "-- 0.294117647058824"
+[1] "-- 0.313725490196078"
+[1] "-- 0.333333333333333"
+[1] "-- 0.352941176470588"
+[1] "-- 0.372549019607843"
+[1] "-- 0.392156862745098"
+[1] "-- 0.411764705882353"
+[1] "-- 0.431372549019608"
+[1] "-- 0.450980392156863"
+[1] "-- 0.470588235294118"
+[1] "-- 0.490196078431373"
+[1] "-- 0.509803921568627"
+[1] "-- 0.529411764705882"
+[1] "-- 0.549019607843137"
+[1] "-- 0.568627450980392"
+[1] "-- 0.588235294117647"
+[1] "-- 0.607843137254902"
+[1] "-- 0.627450980392157"
+[1] "-- 0.647058823529412"
+[1] "-- 0.666666666666667"
+[1] "-- 0.686274509803922"
+[1] "-- 0.705882352941177"
+[1] "-- 0.725490196078431"
+[1] "-- 0.745098039215686"
+[1] "-- 0.764705882352941"
+[1] "-- 0.784313725490196"
+[1] "-- 0.803921568627451"
+[1] "-- 0.823529411764706"
+[1] "-- 0.843137254901961"
+[1] "-- 0.862745098039216"
+[1] "-- 0.882352941176471"
+[1] "-- 0.901960784313726"
+[1] "-- 0.92156862745098"
+[1] "-- 0.941176470588235"
+[1] "-- 0.96078431372549"
+[1] "-- 0.980392156862745"
+[1] "-- 1"
+Killed
